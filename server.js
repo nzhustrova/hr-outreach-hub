@@ -104,9 +104,36 @@ function requireKey(name) {
   return v;
 }
 
+/**
+ * Замок бесплатной зоны Explee. Провайдер берёт деньги за каждый результат сверх первых
+ * 100 НАБОРА ФИЛЬТРОВ — неважно, добран он большим `page_size` или следующей страницей
+ * (замеры и полная модель — в шапке `angles.js`).
+ *
+ * Замок стоит на ГРАНИЦЕ API, а не только в вызывающем коде, и это не перестраховка:
+ * ограничение, живущее лишь в вызывающем коде, переживает ровно одну правку соседнего
+ * файла. Здесь же оно закрывает и путь «кто-то дёрнул эндпоинт руками или из консоли».
+ *
+ * Объём берётся числом углов (наборов фильтров), у каждого своя бесплатная сотня.
+ */
+function expleeFreeZoneGuard(body, res) {
+  const size = Number(body?.page_size) || 0;
+  const page = Number(body?.page) || 1;
+  if (size > 100 || page > 1) {
+    res.status(402).json({
+      error: 'Explee bills every result past the first 100 of a filter set'
+        + ` (asked: page_size ${size || '—'}, page ${page}).`,
+      cheaperWay: 'Ask for page 1 with page_size ≤ 100. Volume comes from MORE filter sets —'
+        + ' each new one has its own free 100 — not from deeper pages.',
+    });
+    return true;
+  }
+  return false;
+}
+
 // --- Explee: поиск людей (people_filters + company_filters) ---
 app.post('/api/explee/people', async (req, res) => {
   try {
+    if (expleeFreeZoneGuard(req.body, res)) return;
     const r = await fetch(`${EXPLEE}/search/people`, {
       method: 'POST',
       headers: { 'X-API-Key': requireKey('EXPLEE_API_KEY'), 'Content-Type': 'application/json' },
@@ -488,7 +515,7 @@ app.post('/api/search/angles', async (req, res) => {
 
     // Угол №0 — реестр (бесплатные проверенные кандидаты), параллельно с Explee-углами.
     const [explee, registryRows] = await Promise.all([
-      runAngles({ basePayload, angles: g.angles, pageSize: 10 }),
+      runAngles({ basePayload, angles: g.angles, pageSize: 100, wanted: 100 }),
       registryEnabled()
         ? registryAngle({ titles: criteria.titles || [], location: criteria.location, sizes: criteria.sizes || [] }).catch(() => [])
         : Promise.resolve([]),

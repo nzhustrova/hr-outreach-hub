@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const HAIKU = 'claude-haiku-4-5-20251001';
-const MAX_ANGLES = 5;
+const MAX_ANGLES = 8;
 
 const angleCache = new Map(); // hash(criteria) → {ideal_lead, angles} (память процесса — достаточно для сессии)
 
@@ -101,33 +101,114 @@ export function identityKeyServer(p) {
   return `${tokens}|${(p.company_name || p.company || '').toLowerCase()}`;
 }
 
+/**
+ * ⚠️ ЦЕНА ПОИСКА У EXPLEE — знание, купленное сожжённым балансом (20–21.08.2026).
+ * Прочитай это до любой правки объёмов поиска.
+ *
+ * ЧТО СЛУЧИЛОСЬ. В коде стояло убеждение «поиск людей у Explee кредитов не тратит».
+ * Оно было основано на честном замере: при `page_size` 5 и 10 провайдер отвечает
+ * `credits_charged: 0.0`. На этом основании был построен постраничный обход всего пула.
+ * За один день обход сжёг практически весь баланс.
+ *
+ * ИЗМЕРЕННЫЕ ФАКТЫ (живые вызовы, не документация):
+ *   • `page_size` 1, 10, 100 → данные, `credits_charged: 0.0`;
+ *   • `page_size` 150        → данные, `credits_charged: 50.0`;
+ *   • одни и те же фильтры, три запроса подряд по 100:
+ *       страница 1 → списано 0 · страница 2 → списано 100 · страница 3 → списано 100;
+ *   • та же страница 1 ПОВТОРНО → 0 (перезапуск поиска бесплатен);
+ *   • страница 1 при ДРУГИХ фильтрах → 0 (у каждого набора фильтров своя бесплатная сотня);
+ *   • при нулевом балансе `page_size >= 200` → HTTP 402;
+ *   • отдельно есть лимит частоты: 15 бесплатных запросов в минуту на организацию
+ *     (тариф Starter), 2000 в сутки. Это 429, и он НЕ то же самое, что 402.
+ *
+ * ИСТИННАЯ МОДЕЛЬ: бесплатны первые 100 результатов НАБОРА ФИЛЬТРОВ, а не запроса.
+ * Результат 101 и далее стоит 1 кредит — неважно, добран он большим `page_size`
+ * или следующей страницей.
+ *
+ * ⚠️ ОТДЕЛЬНО: на нулевом балансе перестаёт работать и БЕСПЛАТНЫЙ поиск — документация
+ * Explee требует положительный баланс для любого запроса. Баланс нельзя доводить до нуля,
+ * даже если работаешь только в бесплатной зоне.
+ *
+ * ЧТО ИЗ ЭТОГО СЛЕДУЕТ ДЛЯ АРХИТЕКТУРЫ — главное:
+ * объём берётся умножением НАБОРОВ ФИЛЬТРОВ, а не страниц. Каждый угол — свой набор
+ * фильтров, значит своя бесплатная сотня. Восемь углов дают ~800 сырых строк бесплатно
+ * (после дедупа ~490 уникальных) — этого хватает на волну в 300 контактов при нулевой
+ * цене поиска. Постраничный добор — платный аварийный выход, а не способ набрать пул.
+ *
+ * ПРАВИЛО В КОДЕ, которое нельзя снимать не подумав:
+ *   • `wanted` по умолчанию 100 — ровно одна страница на угол;
+ *   • `pageSize` жёстко зажат в 100 (`EXPLEE_MAX_PAGE_SIZE`);
+ *   • нужен объём — увеличивай ЧИСЛО УГЛОВ, а не глубину страниц;
+ *   • граница API (`/api/explee/people`) отклоняет `page_size > 100` и `page > 1`.
+ *     Ограничение живёт и в вызывающем коде, и на границе: только в вызывающем оно
+ *     переживает ровно одну правку соседнего файла.
+ *
+ * УРОК, стоивший баланса: измерение на одном значении параметра ничего не говорит
+ * о другом. Сначала «бесплатно при page_size=10» приняли за «бесплатно всегда»; потом
+ * «бесплатно на первой странице» приняли за «бесплатно на каждой». Проверять надо
+ * границу, а не точку.
+ */
+export const EXPLEE_FREE_RESULTS = 100;
+export const EXPLEE_MAX_PAGE_SIZE = 100;
+
 // Выполнение углов: параллельные Explee-запросы (клон basePayload с подменой titles/definition).
-export async function runAngles({ basePayload, angles, pageSize = 10 }) {
+// Каждый угол — ОТДЕЛЬНЫЙ поиск, а не слой скоринга: оператор видит объединение выдач
+// всех углов с дедупом по личности.
+export async function runAngles({ basePayload, angles, pageSize = 100, page = 1, wanted = EXPLEE_FREE_RESULTS }) {
   const EXPLEE = 'https://api.explee.com/public/api/v1';
   const key = process.env.EXPLEE_API_KEY;
+  const size = Math.min(EXPLEE_MAX_PAGE_SIZE, Math.max(1, pageSize));
 
   const tasks = angles.map(async (angle) => {
-    const payload = JSON.parse(JSON.stringify(basePayload));
-    if (angle.titles?.length) payload.people_filters.job_titles = angle.titles;
-    if (angle.definition) payload.company_filters.definition = angle.definition;
-    payload.page_size = pageSize;
-    try {
-      const r = await fetch(`${EXPLEE}/search/people`, {
-        method: 'POST',
-        headers: { 'X-API-Key': key, 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await r.json();
-      if (!r.ok) return { angle: angle.label, error: data?.detail || r.status, people: [], total: null };
-      return {
-        angle: angle.label,
-        people: data.people || [],
-        total: data?.meta?.total ?? null,
-        balance: data?.meta?.remaining_balance ?? null,
-      };
-    } catch (e) {
-      return { angle: angle.label, error: String(e.message || e), people: [], total: null };
+    const base = JSON.parse(JSON.stringify(basePayload));
+    if (angle.titles?.length) base.people_filters.job_titles = angle.titles;
+    if (angle.definition) base.company_filters.definition = angle.definition;
+    const people = [];
+    let total = null;
+    let balance = null;
+    let charged = 0;
+    const firstPage = Number(page) || 1;
+    const maxPages = Math.max(1, Math.ceil(wanted / size));
+    for (let i = 0; i < maxPages; i += 1) {
+      const payload = { ...base, page_size: size, page: firstPage + i };
+      try {
+        const r = await fetch(`${EXPLEE}/search/people`, {
+          method: 'POST',
+          headers: { 'X-API-Key': key, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await r.json();
+        if (!r.ok) {
+          // Три РАЗНЫХ причины неудачи, и путать их нельзя: «угол ничего не нашёл» — свойство
+          // сегмента, а 402 и 429 требуют действий, и разных.
+          const detail = data?.detail || r.status;
+          const outOfMoney = r.status === 402 || /insufficient balance/i.test(String(detail));
+          const quotaHit = r.status === 429;
+          return {
+            angle: angle.label, people, total, charged,
+            error: outOfMoney
+              ? `нет баланса Explee (${detail}). На нуле не работает и бесплатный поиск — пополни баланс.`
+              : quotaHit
+                ? `исчерпана бесплатная квота Explee: 15 запросов в минуту и 2000 в сутки на тарифе Starter (${detail}). Подожди минуту — платные запросы этой квотой не ограничены.`
+                : detail,
+            outOfMoney, quotaHit, frameChanged: Boolean(angle.definition),
+          };
+        }
+        const rows = data.people || [];
+        people.push(...rows);
+        total = data?.meta?.total ?? total;
+        balance = data?.meta?.remaining_balance ?? balance;
+        // `credits_charged` провайдер присылает В КАЖДОМ ответе. Раньше его выбрасывали и
+        // читали только остаток — именно поэтому расход 20.08 пришлось восстанавливать
+        // сопоставлением коммитов с кабинетом Explee. Это ИЗМЕРЕННАЯ цена, не оценка.
+        charged += Number(data?.meta?.credits_charged || 0);
+        if (rows.length < size) break;      // пул исчерпан
+        if (people.length >= wanted) break; // набрали сколько просили
+      } catch (e) {
+        return { angle: angle.label, error: String(e.message || e), people, total, charged, frameChanged: Boolean(angle.definition) };
+      }
     }
+    return { angle: angle.label, people, total, balance, charged, frameChanged: Boolean(angle.definition) };
   });
 
   const settled = await Promise.all(tasks);
@@ -142,9 +223,20 @@ export async function runAngles({ basePayload, angles, pageSize = 10 }) {
     }
   }
   const balance = settled.map((s) => s.balance).filter((b) => b != null).pop() ?? null;
+  // Суммарное СПИСАНИЕ по всем углам — измеренное провайдером, а не наша оценка.
+  const charged = settled.reduce((n, r) => n + Number(r.charged || 0), 0);
   return {
     results: [...seen.values()],
-    angleStats: settled.map(({ angle, total, error, people }) => ({ angle, total, error: error || null, returned: people.length })),
+    angleStats: settled.map(({ angle, total, error, people, frameChanged, outOfMoney, quotaHit, charged: c }) => ({
+      angle, total, error: error || null, returned: people.length,
+      frameChanged: Boolean(frameChanged),
+      outOfMoney: Boolean(outOfMoney),
+      quotaHit: Boolean(quotaHit),
+      charged: Number(c || 0),
+      // Есть ли у угла ещё люди сверх того, что мы забрали. Отвечает на «в сегменте ещё N».
+      more: total != null ? Math.max(0, total - people.length) : null,
+    })),
     balance,
+    charged,
   };
 }

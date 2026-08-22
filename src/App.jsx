@@ -398,42 +398,6 @@ export default function App() {
     }
   }
 
-  // «Load all»: догружает страницы базового угла до полного сегмента (кап 200 строк — защита от гигантских сегментов).
-  const [loadingAll, setLoadingAll] = useState(false);
-  async function onLoadAll() {
-    setLoadingAll(true);
-    setError('');
-    try {
-      // Потолок 1000: поиск людей кредитов не тратит ни у Explee, ни у Apollo (платный только
-      // reveal почты), поэтому грузить весь пул можно. Ограничение нужно, чтобы пул на 5 000
-      // не подвесил браузер.
-      const CAP = 1000;
-      let merged = results;
-      let p = page;
-      while (merged.length < Math.min(total ?? CAP, CAP) && p < 30) {
-        p += 1;
-        const data = await fetchPage(p);
-        const norm = normalizeResults(provider, data);
-        if (!norm.length) break;
-        merged = [...merged, ...norm.filter((n) => !merged.some((r) => keyOf(r) === keyOf(n)))];
-        // Обновляем по ходу: иначе «загружено 300 из 495» показать нечем, и экран стоит
-        // мёртвым, пока идут пять запросов подряд.
-        setResults(merged);
-      }
-      const flgs = merged.map((x, i) => flagResult(x, merged, i));
-      setResults(merged);
-      setFlags(flgs);
-      setScores(computeScores(merged, flgs));
-      markCrmBlocked(merged);
-      loadRegistryState(merged);
-      judgeAndRescore(merged, flgs);
-      setPage(p);
-    } catch (e) {
-      setError(String(e.message || e));
-    } finally {
-      setLoadingAll(false);
-    }
-  }
 
   const isPicked = (r) => shortlist.some((s) => keyOf(s) === keyOf(r));
   const togglePick = (r) => {
@@ -443,7 +407,6 @@ export default function App() {
   };
 
   const [page, setPage] = useState(1);
-  const [loadingMore, setLoadingMore] = useState(false);
 
   async function fetchPage(pageNum) {
     // Страница 1 в Explee-режиме — мультиугловой поиск (углы + реестр); Load more — базовый угол постранично.
@@ -451,14 +414,14 @@ export default function App() {
       const r = await fetch('/api/search/angles', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ criteria: form, basePayload: buildExpleePayload(form, 10, 1) }),
+        body: JSON.stringify({ criteria: form, basePayload: buildExpleePayload(form, 100, 1) }),
       });
       const data = await r.json();
       if (r.ok) return data;
       console.warn('angles search failed, falling back to single-angle:', data.error);
     }
     const url = provider === 'apollo' ? '/api/apollo/people' : '/api/explee/people';
-    const payload = provider === 'apollo' ? buildApolloPayload(form, 10, pageNum) : buildExpleePayload(form, 10, pageNum);
+    const payload = provider === 'apollo' ? buildApolloPayload(form, 10, pageNum) : buildExpleePayload(form, 100, pageNum);
     const r = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -522,9 +485,14 @@ export default function App() {
       markCrmBlocked(norm);
       loadRegistryState(norm);
       judgeAndRescore(norm, flgs);
-      // Догружаем остальной пул сразу: оператору нужен весь набор, чтобы отсортировать его
-      // целиком и отобрать рекомендованных по всей выдаче, а не по первой странице.
-      if (data?.meta?.total > norm.length || (data?.total ?? 0) > norm.length) setTimeout(onLoadAll, 0);
+      // ⚠️ ЗДЕСЬ РАНЬШЕ БЫЛ АВТОМАТИЧЕСКИЙ ПОСТРАНИЧНЫЙ ОБХОД ВСЕГО ПУЛА — и он молча тратил
+      // деньги. Explee берёт 1 кредит за каждый результат сверх первых 100 набора фильтров,
+      // поэтому обход страниц 2…30 стоил до ~200 кредитов за один поиск. Полная модель
+      // тарификации и замеры — в шапке `angles.js`.
+      //
+      // Объём берётся ЧИСЛОМ УГЛОВ, а не глубиной страниц: у каждого угла (набора фильтров)
+      // своя бесплатная сотня, восемь углов дают ~800 сырых строк за $0. Если выдачи мало —
+      // добавляй углы или расширяй критерии, но НЕ включай обход страниц обратно.
     } catch (e) {
       setError(String(e.message || e));
     } finally {
@@ -532,30 +500,6 @@ export default function App() {
     }
   }
 
-  async function onLoadMore() {
-    setLoadingMore(true);
-    setError('');
-    try {
-      const next = page + 1;
-      const data = await fetchPage(next);
-      setRawResponse(data);
-      if (data?.meta?.remaining_balance != null) setBalance(data.meta.remaining_balance);
-      const norm = normalizeResults(provider, data);
-      const merged = [...results, ...norm.filter((n) => !results.some((r) => keyOf(r) === keyOf(n)))];
-      const flgs = merged.map((x, i) => flagResult(x, merged, i));
-      setResults(merged);
-      setFlags(flgs);
-      setScores(computeScores(merged, flgs));
-      markCrmBlocked(merged);
-      loadRegistryState(merged);
-      judgeAndRescore(merged, flgs);
-      setPage(next);
-    } catch (e) {
-      setError(String(e.message || e));
-    } finally {
-      setLoadingMore(false);
-    }
-  }
 
   return (
     <div className="layout">
@@ -638,25 +582,23 @@ export default function App() {
             />
             {(results.length > 0 || apolloTotal > 0) && (
               <div className="load-buttons">
-                {/* Кнопок «Load more» и «Load all» больше нет: пул грузится целиком сразу
-                    после поиска, а на экран отдаётся страницами (ТЗ п.39). Здесь остаётся
-                    только индикатор прогресса и добор из Apollo — он платный и потому ручной. */}
-                {loadingAll && (
+                {/* Кнопок добора страниц здесь нет СОЗНАТЕЛЬНО: у Explee всё сверх первых 100
+                    результатов набора фильтров стоит 1 кредит за строку, поэтому обход страниц —
+                    платный путь. Объём набирается углами: у каждого своя бесплатная сотня.
+                    Добор из Apollo остаётся — он платный и потому только вручную, с ценой на кнопке. */}
+                {results.length > 0 && total > results.length && (
                   <span className="hint">
-                    Loading the rest of the pool… {results.length}{total ? ` of ${Number(total).toLocaleString('en-US')}` : ''}
-                  </span>
-                )}
-                {!loadingAll && results.length > 0 && total > results.length && (
-                  <span className="hint">
-                    Loaded {results.length} of {Number(total).toLocaleString('en-US')} — the pool is capped at 1000 per search.
+                    Loaded {results.length} of {Number(total).toLocaleString('en-US')} — free zone is
+                    the first 100 per angle. To get more, widen the segment or add angles: paging
+                    deeper is billed 1 credit per row.
                   </span>
                 )}
                 {provider === 'explee' && apolloTotal > 0 && (
                   <>
-                    <button className="load-more topup" onClick={() => apolloTopUp(10)} disabled={loadingMore || loadingAll || toppingUp}>
+                    <button className="load-more topup" onClick={() => apolloTopUp(10)} disabled={toppingUp}>
                       {toppingUp ? 'Topping up…' : 'Top up from Apollo +10 (≈10 cr)'}
                     </button>
-                    <button className="load-more topup" onClick={() => apolloTopUp(50)} disabled={loadingMore || loadingAll || toppingUp}>
+                    <button className="load-more topup" onClick={() => apolloTopUp(50)} disabled={toppingUp}>
                       +50 (≈50 cr)
                     </button>
                   </>
