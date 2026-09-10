@@ -7,17 +7,22 @@
 
 // signer: true — от этого человека мы шлём кампании (у него есть карточка sender_* в базе знаний).
 // Остальные личности нужны только чтобы опознать их ящики и НЕ дать отправить с них чужой текст.
+// Рекрутинговая конфигурация (Natalia, 2026-09-10): единственный подписант —
+// Natalia. Ящики продаж опознаются, чтобы С НИХ ничего не ушло (signer: false
+// = замок §2.3 их блокирует), но волны найма они не ведут.
 const RULES = [
-  { id: 'stan', name: 'Stan', match: /^stan([._-]|$)/i, signer: true },
-  { id: 'anton', name: 'Anton', match: /^anton([._-]|$)/i, signer: true },
+  { id: 'natalia', name: 'Natalia', match: /^natalia([._-]|$)/i, signer: true },
+  { id: 'stan', name: 'Stan', match: /^stan([._-]|$)/i, signer: false },
+  { id: 'anton', name: 'Anton', match: /^anton([._-]|$)/i, signer: false },
   { id: 'supplier', name: 'Supplier team', match: /^supplier/i, signer: false },
 ];
 
 // Адреса, которые не выводятся из локальной части (например, t.urban@ → Tony).
 const OVERRIDES = {
+  'n.zhustrova@zinit.com': { id: 'natalia', name: 'Natalia', signer: true },
   't.urban@zinit.com': { id: 'tony', name: 'Tony', signer: false },
   'o.zhulikova@zinit.com': { id: 'olga', name: 'Olga', signer: false },
-  's.moskovtsev@zinit.com': { id: 'stan', name: 'Stan', signer: true },
+  's.moskovtsev@zinit.com': { id: 'stan', name: 'Stan', signer: false },
 };
 
 export const UNASSIGNED = { id: 'unassigned', name: 'Unassigned' };
