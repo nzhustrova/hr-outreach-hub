@@ -31,6 +31,6 @@ in email, never in a LinkedIn invite note (space is scarce).
 
 ## Mechanics reminder
 An angle signed by Natalia can only be launched from Natalia's mailboxes
-(`natalia@…`, `n.zhustrova@zinit.com`). Sales mailboxes (`stan@`, `anton@`, `supplier@`)
+(`join@zinit.com`, `n.zhustrova@zinit.com`, `natalia@…`). Sales mailboxes (`stan@`, `anton@`, `supplier@`)
 are recognized but blocked as signers in this recruiting configuration — hiring waves never
 send from sales identities.

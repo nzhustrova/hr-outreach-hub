@@ -20,6 +20,10 @@ const RULES = [
 // Адреса, которые не выводятся из локальной части (например, t.urban@ → Tony).
 const OVERRIDES = {
   'n.zhustrova@zinit.com': { id: 'natalia', name: 'Natalia', signer: true },
+  // Ящик рекрутинговой отправки (решение Natalia 2026-09-10): волны идут
+  // с join@, подписывается Natalia — оба адреса принадлежат одной личности,
+  // иначе замок «ящик ≠ подписант» не пропустит запуск.
+  'join@zinit.com': { id: 'natalia', name: 'Natalia', signer: true },
   't.urban@zinit.com': { id: 'tony', name: 'Tony', signer: false },
   'o.zhulikova@zinit.com': { id: 'olga', name: 'Olga', signer: false },
   's.moskovtsev@zinit.com': { id: 'stan', name: 'Stan', signer: false },
