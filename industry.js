@@ -9,8 +9,7 @@
 // на весь список вместо ста, и вердикт кэшируется навсегда — пара «Industrial Manufacturing ×
 // Retail Apparel and Fashion» не изменится. Со второй недели модель зовётся только для новых.
 import { getPool, registryEnabled } from './db/registry.js';
-
-const HAIKU = 'claude-haiku-4-5-20251001';
+import { askLLM, llmAvailable } from './llm.js';
 
 export const VERDICTS = ['fits', 'adjacent', 'mismatch'];
 
@@ -47,7 +46,7 @@ export async function judgeIndustries(selected, companies = []) {
   const out = {};
   for (const [k, v] of Object.entries(cache)) out[k] = { ...v, from: 'cache' };
   const missing = uniq.filter((c) => !out[c]);
-  if (!missing.length || !process.env.ANTHROPIC_API_KEY) {
+  if (!missing.length || !llmAvailable()) {
     // Без ключа не гадаем: неизвестное — «смежное», а не «не подходит». Отсутствие данных
     // не должно резать контакт, это общий принцип (см. валидацию адресов).
     for (const c of missing) out[c] = { verdict: 'adjacent', note: 'not judged yet', from: 'fallback' };
@@ -73,18 +72,8 @@ Return STRICT JSON only, no markdown:
 {"verdicts":[{"company":"<exact string from the list>","verdict":"fits|adjacent|mismatch","note":"<max 12 words, why>"}]}`;
 
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ model: HAIKU, max_tokens: 1500, messages: [{ role: 'user', content: prompt }] }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(`anthropic ${r.status}`);
-    const parsed = JSON.parse((data.content?.[0]?.text || '{}').replace(/^```json?\s*|\s*```$/g, ''));
+    const text = (await askLLM(prompt, { maxTokens: 1500 })) || '{}';
+    const parsed = JSON.parse(text.replace(/^```json?\s*|\s*```$/g, ''));
     const rows = (parsed.verdicts || [])
       .filter((v) => VERDICTS.includes(v.verdict) && missing.includes(v.company));
     await saveVerdicts(selected, rows);

@@ -29,6 +29,7 @@ import { judgeIndustries } from './industry.js';
 import { sendTelegram } from './notify.js';
 import * as smartlead from './smartlead.js';
 import { compressDetail } from './classify.js';
+import { askLLM, llmAvailable } from './llm.js';
 import { replyKnowledge, senderCard, cardByName, WRITING_STYLE } from './knowledge.js';
 import { verifyEnabled, verifyEmail, credits as verifyCredits } from './verify.js';
 import { contactsToVerify, staleContacts, applyVerification, verifyCounters, sourceQuality } from './db/validation.js';
@@ -431,7 +432,7 @@ app.post('/api/serper/unique-detail', async (req, res) => {
     }));
     const organic = searches.flat();
     if (!organic.length) return res.json({ detail: null, details: [], reason: 'no search results' });
-    if (!process.env.ANTHROPIC_API_KEY) return res.json({ detail: null, details: [], reason: 'no LLM key' });
+    if (!llmAvailable()) return res.json({ detail: null, details: [], reason: 'no LLM key' });
 
     const prompt = `You research a company before a cold B2B email from a procurement-software vendor. Below are Google results (past year) for "${company}"${domain ? ` (website: ${domain})` : ''}. The prospect is ${name || 'a decision maker'}, ${title || 'procurement leader'}.
 
@@ -459,18 +460,12 @@ If nothing clearly about this company — {"details":[], "liveness":{"status":"u
 Results:
 ${JSON.stringify(organic, null, 1)}`;
 
-    const ar = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 900, messages: [{ role: 'user', content: prompt }] }),
-    });
-    const adata = await ar.json();
-    if (!ar.ok) return res.status(502).json({ error: `anthropic ${ar.status}` });
-    const text = (adata.content?.[0]?.text || '{}').replace(/^```json?\s*|\s*```$/g, '');
+    let text;
+    try {
+      text = ((await askLLM(prompt, { maxTokens: 900 })) || '{}').replace(/^```json?\s*|\s*```$/g, '');
+    } catch (e) {
+      return res.status(502).json({ error: e.message });
+    }
     const parsed = JSON.parse(text);
     const details = (parsed.details || []).filter((d) => d?.detail).slice(0, 4);
     // Второй слой защиты от мёртвых компаний (методология, блок 1). Признаки закрытия достаём
@@ -596,7 +591,7 @@ app.post('/api/message-angles/:id/twin', async (req, res) => {
     // письмо становилось ложью. Строку доверия и голос берём из карточки нового отправителя.
     const card = senderCard(signedBy);
     let sequence = (src.sequence || []).map((s) => ({ ...s, body: ensureSignature(s.body, signedBy) }));
-    if (process.env.ANTHROPIC_API_KEY && card) {
+    if (llmAvailable() && card) {
       const prompt = `Rewrite this cold email sequence so it comes from ${signedBy} instead of the previous sender.
 
 RULES:
@@ -620,21 +615,10 @@ ${JSON.stringify(sequence.map((s) => ({ wait_days: s.wait_days, subject: s.subje
 
 Return STRICT JSON only: {"sequence":[{"wait_days":0,"subject":"...","body":"..."}, ...]}`;
       try {
-        const r = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'x-api-key': process.env.ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 2000, messages: [{ role: 'user', content: prompt }] }),
-        });
-        const data = await r.json();
-        if (r.ok) {
-          const parsed = JSON.parse((data.content?.[0]?.text || '{}').replace(/^```json?\s*|\s*```$/g, ''));
-          if (parsed.sequence?.length === sequence.length) {
-            sequence = parsed.sequence.map((s) => ({ ...s, body: ensureSignature(s.body, signedBy) }));
-          }
+        const text = (await askLLM(prompt, { maxTokens: 2000 })) || '{}';
+        const parsed = JSON.parse(text.replace(/^```json?\s*|\s*```$/g, ''));
+        if (parsed.sequence?.length === sequence.length) {
+          sequence = parsed.sequence.map((s) => ({ ...s, body: ensureSignature(s.body, signedBy) }));
         }
       } catch (e) {
         console.error('[angle:twin] rewrite failed, falling back to signature-only:', e.message);
@@ -679,7 +663,7 @@ app.post('/api/message-angles/:id/approve', async (req, res) => {
 // Матрица: сегмент (кому) × знания Zinit (что даём) → message angle (что пишем).
 app.post('/api/message-angles/draft', async (req, res) => {
   try {
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'no ANTHROPIC_API_KEY' });
+    if (!llmAvailable()) return res.status(503).json({ error: 'no LLM key (OPENAI_API_KEY or ANTHROPIC_API_KEY)' });
     const { criteria = {}, instruction = '', signedBy = 'Stan' } = req.body;
     const segmentText = [
       criteria.industry, (criteria.titles || []).join(', '), criteria.titleType,
@@ -741,18 +725,13 @@ ${kb}
 Return STRICT JSON only:
 {"name":"<short slug, e.g. A4-tail-spend>","description":"<one line: which segment and what the angle bets on>","sequence":[{"wait_days":0,"subject":"...","body":"..."},{"wait_days":3,"subject":"","body":"..."},{"wait_days":4,"subject":"","body":"..."}]}`;
 
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 2000, messages: [{ role: 'user', content: prompt }] }),
-    });
-    const data = await r.json();
-    if (!r.ok) return res.status(502).json({ error: `anthropic ${r.status}` });
-    const parsed = JSON.parse((data.content?.[0]?.text || '{}').replace(/^```json?\s*|\s*```$/g, ''));
+    let drafted;
+    try {
+      drafted = (await askLLM(prompt, { maxTokens: 2000 })) || '{}';
+    } catch (e) {
+      return res.status(502).json({ error: e.message });
+    }
+    const parsed = JSON.parse(drafted.replace(/^```json?\s*|\s*```$/g, ''));
     if (!parsed.sequence?.length) return res.status(502).json({ error: 'LLM returned no sequence' });
     // Подпись не оставляем на волю модели: без неё заход незапускаем (кейс 08.08 — LLM забыла подписать).
     parsed.sequence = parsed.sequence.map((s) => ({ ...s, body: ensureSignature(s.body, signedBy) }));
@@ -777,7 +756,7 @@ Return STRICT JSON only:
 app.post('/api/message-angles/:id/draft-linkedin', async (req, res) => {
   if (!requireRegistry(res)) return;
   try {
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'no ANTHROPIC_API_KEY' });
+    if (!llmAvailable()) return res.status(503).json({ error: 'no LLM key (OPENAI_API_KEY or ANTHROPIC_API_KEY)' });
     // «new» — заход ещё не сохранён: конвертируем цепочку из тела запроса. Требовать
     // «сначала сохрани» было лишним шагом (вопрос Ольги 14.08) — цепочка уже на экране.
     const angle = req.params.id === 'new'
@@ -821,18 +800,8 @@ ${kb}
 
 Return STRICT JSON only:
 {"linkedin":{"message1":{"body":"..."},"followup":{"wait_days":3,"body":"..."}}}`;
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'x-api-key': process.env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 800, messages: [{ role: 'user', content: prompt }] }),
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(`anthropic ${r.status}`);
-      return JSON.parse((data.content?.[0]?.text || '{}').replace(/^```json?\s*|\s*```$/g, '')).linkedin || null;
+      const text = (await askLLM(prompt, { maxTokens: 800 })) || '{}';
+      return JSON.parse(text.replace(/^```json?\s*|\s*```$/g, '')).linkedin || null;
     };
 
     let li = await ask();
@@ -1050,7 +1019,7 @@ app.post('/api/inbox/:touchId/classification', async (req, res) => {
 app.post('/api/inbox/:touchId/suggest', async (req, res) => {
   if (!requireRegistry(res)) return;
   try {
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'no ANTHROPIC_API_KEY' });
+    if (!llmAvailable()) return res.status(503).json({ error: 'no LLM key (OPENAI_API_KEY or ANTHROPIC_API_KEY)' });
     const { getPool } = await import('./db/registry.js');
     const t = (await getPool().query(
       `SELECT t.*, c.full_name, c.title, c.company, c.company_industry, c.company_size, c.unique_detail
@@ -1096,18 +1065,12 @@ ${kb}
 
 Return ONLY the reply text.`;
 
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 500, messages: [{ role: 'user', content: prompt }] }),
-    });
-    const data = await r.json();
-    if (!r.ok) return res.status(502).json({ error: `anthropic ${r.status}` });
-    let draft = (data.content?.[0]?.text || '').trim();
+    let draft;
+    try {
+      draft = ((await askLLM(prompt, { maxTokens: 500 })) || '').trim();
+    } catch (e) {
+      return res.status(502).json({ error: e.message });
+    }
     if (isLinkedin) {
       // Страховка поверх промпта: модель иногда подписывается по привычке. Срезаем короткую
       // последнюю строку, если она выглядит именем — правило важнее послушности модели.
@@ -2475,6 +2438,7 @@ app.get('/api/health', (_req, res) => {
       explee: Boolean(process.env.EXPLEE_API_KEY),
       apollo: Boolean(process.env.APOLLO_API_KEY),
       serper: Boolean(process.env.SERPER_API_KEY),
+      llm: llmAvailable(),
     },
   });
 });

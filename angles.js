@@ -1,10 +1,9 @@
 // Движок углов (методология, блоки 1 и 5): LLM формирует «идеального лида» и углы-вариации,
 // углы выполняются параллельно (Explee) + угол №0 из реестра; union + дедуп по identity.
-// Без ANTHROPIC_API_KEY деградирует мягко: один базовый угол + реестр.
+// Без LLM-ключа (OpenAI или Anthropic) деградирует мягко: один базовый угол + реестр.
 import crypto from 'node:crypto';
+import { askLLM, llmAvailable } from './llm.js';
 
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const HAIKU = 'claude-haiku-4-5-20251001';
 const MAX_ANGLES = 8;
 
 const angleCache = new Map(); // hash(criteria) → {ideal_lead, angles} (память процесса — достаточно для сессии)
@@ -14,7 +13,7 @@ function criteriaHash(criteria) {
 }
 
 export function anglesEnabled() {
-  return Boolean(process.env.ANTHROPIC_API_KEY);
+  return llmAvailable();
 }
 
 export async function generateAngles(criteria) {
@@ -61,22 +60,7 @@ Rules: 3-${MAX_ANGLES} angles. Each angle = different title formulations (synony
 SENIORITY FLOOR (strict): every generated title must be AT OR ABOVE the seniority level of the selected titles / minimum seniority. If the selected titles are C-level, VP or Head — do NOT generate Manager-, Specialist- or Coordinator-level titles.
 Angles must be meaningfully different from each other.`;
 
-  const r = await fetch(ANTHROPIC_URL, {
-    method: 'POST',
-    headers: {
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: HAIKU,
-      max_tokens: 1200,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-  });
-  const data = await r.json();
-  if (!r.ok) throw new Error(`anthropic ${r.status}: ${JSON.stringify(data).slice(0, 200)}`);
-  const text = data.content?.[0]?.text || '{}';
+  const text = (await askLLM(prompt, { maxTokens: 1200 })) || '{}';
   const parsed = JSON.parse(text.replace(/^```json?\s*|\s*```$/g, ''));
   const result = {
     ideal_lead: parsed.ideal_lead || null,
