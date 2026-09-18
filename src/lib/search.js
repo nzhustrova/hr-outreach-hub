@@ -1,10 +1,7 @@
 import { applySignal, INDUSTRY_DEFINITIONS, INDUSTRY_APOLLO_TAGS, titleQuery } from './dictionaries.js';
 
 // Explee people_filters.geo ждёт ISO-коды (в ответах geo: "US"), company geo_include — названия.
-const ISO = {
-  'United States': 'US', Canada: 'CA', 'United Kingdom': 'GB',
-  Germany: 'DE', France: 'FR', Netherlands: 'NL',
-};
+import { resolveGeo } from './geo.js';
 
 // Сборка запроса и нормализация ответа по провайдеру.
 // v0: ищем ЛЮДЕЙ (стадии B3+B4 вместе); компании отдельно — позже.
@@ -31,7 +28,8 @@ export function buildExpleePayload(f, pageSize = 10, page = 1) {
   // и Century 21, обе закрытые. Поле у Explee есть (`is_alive`, `is_alive_min` — API-аудит §4),
   // ставится всегда и невидимо для оператора: это гигиена, а не настройка.
   company.is_alive = true;
-  if (f.location) company.geo_include = [f.location];
+  const geo = resolveGeo([f.location]);
+  if (geo.names.length) company.geo_include = geo.names;
   const region = regionByLabel(f.region);
   if (region?.codes?.length) company.geo_subdivision = region.codes; // ISO-3166-2, e.g. US-CA
   if (f.sizes?.length) {
@@ -54,7 +52,7 @@ export function buildExpleePayload(f, pageSize = 10, page = 1) {
   else if (f.titleType && SENIORITY_AS_TITLE[f.titleType]) people.job_titles = SENIORITY_AS_TITLE[f.titleType];
   // Стоп-роли (методология, блок 6): паразитные роли режем до выдачи; «Marketing»-гибриды — скорингом, не exclude.
   people.job_titles_exclude = 'Assistant, Intern, Student, Trainee, Coordinator';
-  if (f.location) people.geo = [ISO[f.location] || f.location];
+  if (geo.codes.length) people.geo = geo.codes;
   people.people_per_company_limit = 2;
 
   return { people_filters: people, company_filters: company, page, page_size: pageSize };
@@ -63,8 +61,8 @@ export function buildExpleePayload(f, pageSize = 10, page = 1) {
 export function buildApolloPayload(f, perPage = 10, page = 1) {
   const p = { per_page: perPage, page };
   const region = regionByLabel(f.region);
-  const loc = region?.apollo || (region?.codes?.length ? null : f.location);
-  p.person_locations = [loc || f.location].filter(Boolean);
+  const geo = resolveGeo([f.location]);
+  p.person_locations = region?.apollo ? [region.apollo] : (geo.names.length ? geo.names : [f.location].filter(Boolean));
   if (region?.codes?.length && !region.apollo) {
     // Macro-region → list of "State, US" strings for Apollo
     p.person_locations = region.codes.map((c) => `${c.slice(3)}, US`);

@@ -2,7 +2,8 @@
 // Sources: Explee OpenAPI enums (captured 2026-08-04, see 02_specs/.../API-аудит) + base values.
 // TODO: full Apollo dictionaries (industry tags, seniority) — task 4.1.
 
-export const LOCATIONS = ['United States', 'Canada', 'United Kingdom', 'Germany', 'France', 'Netherlands'];
+// Countries and regions live in geo.js — one list shared with SerenZi's bridge.
+export { LOCATION_OPTIONS as LOCATIONS } from './geo.js';
 
 // Explee geo_subdivision requires ISO-3166-2 codes (verified 2026-08-06: 'California' → 0, 'US-CA' → results).
 // Macro-regions expand to state code sets (US Census definitions, main states).
