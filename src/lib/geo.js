@@ -79,6 +79,32 @@ export const REGIONS = {
 /** Dropdown options: regions first, then every country by name. */
 export const LOCATION_OPTIONS = [...Object.keys(REGIONS), ...COUNTRIES.map((c) => c.name)]
 
+// A search runs over ONE segment at a time. Explee's free 100 is per filter set,
+// so two markets in one set share that hundred and the denser one takes it —
+// put the US and the Balkans together and the Balkans never surface. Split into
+// segments and each gets its own free hundred, at no extra cost.
+// Segments cover every country above exactly once; grouping is by market, not
+// by continent: same working hours, language and salary band.
+export const MARKET_SEGMENTS = [
+  { key: 'us-ca', label: 'US + Canada', codes: ['US', 'CA'] },
+  { key: 'latam-north', label: 'LatAm North', codes: ['MX', 'GT', 'CR', 'PA', 'DO', 'PR'] },
+  { key: 'latam-south', label: 'LatAm South', codes: ['BR', 'CO', 'AR', 'CL', 'PE', 'UY', 'EC'] },
+  { key: 'balkans', label: 'Balkans', codes: ['RS', 'HR', 'BA', 'ME', 'MK', 'AL', 'SI', 'BG', 'RO', 'GR'] },
+  { key: 'europe-west', label: 'Western Europe', codes: ['GB', 'DE', 'FR', 'NL', 'ES', 'PT', 'PL', 'LT', 'CY'] },
+  { key: 'cis', label: 'CIS + Caucasus', codes: ['GE', 'AM', 'KZ', 'UZ', 'RU'] },
+  { key: 'sea', label: 'South-East Asia', codes: ['ID', 'VN'] },
+  { key: 'india-mena', label: 'India + UAE', codes: ['IN', 'AE'] },
+]
+
+/** Segments a geography touches, each narrowed to the countries it covers. */
+export function segmentsFor(locations = []) {
+  const { codes } = resolveGeo(locations)
+  if (!codes.length) return []
+  return MARKET_SEGMENTS
+    .map((s) => ({ key: s.key, label: s.label, countries: s.codes.filter((c) => codes.includes(c)).map((c) => byIso(c).name) }))
+    .filter((s) => s.countries.length > 0)
+}
+
 const norm = (s) => String(s || '').toLowerCase().replace(/\./g, ' ').trim()
 const escape = (s) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
 // Word-boundary, never substring: `includes('us')` used to turn Cyprus, Belarus
